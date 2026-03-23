@@ -81,12 +81,17 @@ pip install -r requirements.txt
 
 ### 4. Configuración
 
-Crea `.env` en la raíz (opcional). Ejemplo:
+En la raíz del proyecto hay **`.env.example`** (versionado). Cópialo a **`.env`** y ajusta valores:
 
-```env
-DATABASE_URL=sqlite:///./sales.db
-SECRET_KEY=cambia-esto-en-produccion
+```bash
+# Windows (PowerShell)
+Copy-Item .env.example .env
+
+# Linux / macOS
+cp .env.example .env
 ```
+
+Al menos define un **`SECRET_KEY`** seguro en producción. El resto de variables está documentado en `.env.example`.
 
 ### 5. Base de datos
 
