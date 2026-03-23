@@ -1,397 +1,177 @@
-Ah… **dear aspiring programmer**, excelente decisión.
-Documentar tu sistema es lo que convierte tu trabajo en algo **profesional, reutilizable y presentable** (portafolio real 👌).
+# Sales System
 
-Voy a generarte un **README.md completo, estructurado y listo para GitHub**, cubriendo todas las fases que construimos.
+Backend de **gestión de ventas** con API REST (FastAPI), menú CLI, RBAC, facturación (IVA y descuentos), inventario y **reportes** (JSON, gráficos PNG, Excel y PDF).
 
----
-
-# 🚀 Sales System (CLI → API → SaaS)
-
-A professional **Sales Management System** built step-by-step from a CLI application to a scalable SaaS backend using modern technologies.
+**Repositorio:** [github.com/florentz14/sales-system](https://github.com/florentz14/sales-system) · Licencia **MIT** (ver `LICENSE`).
 
 ---
 
-# 🧠 Project Evolution
+## Características
 
-This project follows a **progressive architecture approach**:
-
-1. 🖥️ CLI Application (Core Business Logic)
-2. 🗄️ SQLAlchemy ORM (Database Layer)
-3. 🔐 RBAC System (Roles & Permissions)
-4. 📦 CRUD + Inventory + Invoicing
-5. 📊 Reports + Logging + Transactions
-6. 🌐 REST API (FastAPI)
-7. 🐳 Docker + PostgreSQL
-8. 🔐 JWT Authentication + Security
-9. 🏢 Multi-Tenant SaaS Architecture
-10. ⚡ Redis Caching + Celery Workers
-11. 🚀 CI/CD Pipeline
+| Área | Detalle |
+|------|---------|
+| **API** | Productos, clientes, facturas, usuarios; autenticación JWT |
+| **RBAC** | Roles `admin`, `cashier`, `viewer` y permisos granulares |
+| **Facturas** | Líneas con descuento %, descuento global, tipo impositivo, numeración `INV-xxxxxxxx` |
+| **Datos** | Auditoría y *soft delete* en entidades principales |
+| **CLI** | Menú en español (CRUD + reportes y exportación a `var/reports/`) |
+| **Analytics** | Resumen de ventas, rankings; Matplotlib/Seaborn; export OpenPyXL y ReportLab |
 
 ---
 
-# 🏗️ Tech Stack
+## Stack
 
-## Backend
-
-- Python 3.11+
-- FastAPI
-- SQLAlchemy ORM
-- PostgreSQL
-- Alembic (migrations)
-
-## Security
-
-- JWT (Access + Refresh Tokens)
-- RBAC (Role-Based Access Control)
-- Rate Limiting
-
-## Infrastructure
-
-- Docker / Docker Compose
-- Redis (Caching)
-- Celery (Background Jobs)
-
-## Data & Reports
-
-- Pandas
-- ReportLab (PDF generation)
+- **Python** 3.11+
+- **FastAPI**, **Pydantic**, **Uvicorn**
+- **SQLAlchemy 2** + **Alembic** (SQLite por defecto; PostgreSQL vía `DATABASE_URL`)
+- **JWT** (access token), contraseñas con **bcrypt**
+- **Pandas**, **Matplotlib**, **Seaborn**, **OpenPyXL**, **ReportLab**
+- **Docker Compose**: API, PostgreSQL, Redis, worker **Celery** (opcional según despliegue)
 
 ---
 
-# 📁 Project Structure
+## Estructura del proyecto
 
 ```
 sales_system/
-│
 ├── app/
-│   ├── main.py
-│   ├── api/
+│   ├── main.py              # FastAPI
+│   ├── api/v1/              # auth, products, customers, invoices, users, reports
+│   ├── analytics/           # consultas, gráficos, export Excel/PDF
+│   ├── cli/                 # menú interactivo
+│   ├── core/                # config, security, permissions
+│   ├── db/models/           # ORM
 │   ├── schemas/
-│
-├── db/
-│   ├── session.py
-│   ├── base.py
-│
-├── models/
-├── services/
-├── utils/
-├── tasks/
-├── cli/
-│
-├── alembic/
+│   ├── services/
+│   └── utils/audit.py
+├── alembic/versions/        # migraciones
+├── scripts/seed.py          # RBAC + usuario admin + cliente demo
 ├── docker-compose.yml
 ├── Dockerfile
-└── requirements.txt
+├── requirements.txt
+└── var/reports/             # salida de reportes CLI (gitignored salvo .gitkeep)
 ```
 
 ---
 
-# ⚙️ Installation
+## Instalación local
 
-## 1. Clone repository
+### 1. Clonar
 
-```
+```bash
 git clone https://github.com/florentz14/sales-system.git
 cd sales-system
 ```
 
----
+### 2. Entorno virtual
 
-## 2. Create virtual environment
-
-```
+```bash
 python -m venv .venv
-```
-
-Activate:
-
-```
 # Windows
 .venv\Scripts\activate
-
-# Mac/Linux
+# Linux / macOS
 source .venv/bin/activate
 ```
 
----
+### 3. Dependencias
 
-## 3. Install dependencies
-
-```
+```bash
 pip install -r requirements.txt
 ```
 
----
+### 4. Configuración
 
-# 🗄️ Database Setup
+Crea `.env` en la raíz (opcional). Ejemplo:
 
-## Run migrations
-
+```env
+DATABASE_URL=sqlite:///./sales.db
+SECRET_KEY=cambia-esto-en-produccion
 ```
-alembic upgrade head
-```
 
----
+### 5. Base de datos
 
-## Seed initial data
-
-```
+```bash
+python -m alembic upgrade head
 python scripts/seed.py
 ```
 
-Creates:
+El *seed* crea permisos, roles, usuario **`admin`** / contraseña **`admin`** (cámbiala en producción) y el cliente *Walk-in*.
 
-- Admin user
-- Roles (admin, manager, cashier)
-- Permissions
+### 6. Arrancar la API
 
----
-
-# 🔐 Authentication
-
-## Login
-
-```
-POST /auth/login
+```bash
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Response:
+- Documentación interactiva: [http://localhost:8000/docs](http://localhost:8000/docs)
+- Prefijo API: `/api/v1` (p. ej. login en `/api/v1/auth/login`)
 
-```
-{
-  "access_token": "...",
-  "refresh_token": "..."
-}
+### 7. Menú CLI
+
+```bash
+python -m app.cli.main
 ```
 
 ---
 
-## Refresh Token
+## Autenticación
 
-```
-POST /auth/refresh
-```
+`POST /api/v1/auth/login` (formulario OAuth2: `username`, `password`).
 
----
+Respuesta: `{"access_token": "...", "token_type": "bearer"}`.
 
-# 🎭 RBAC (Authorization)
-
-Permissions example:
-
-- create_product
-- create_invoice
-- manage_users
-
-Usage:
-
-```
-Depends(require_permission("create_product"))
-```
+Incluye el token en cabecera: `Authorization: Bearer <token>`.
 
 ---
 
-# 📦 Core Features
+## Reportes (API)
 
-## Products
+Requiere permiso **`read_report`** (incluido en *seed* para roles adecuados).
 
-- Create / Read / Update / Delete
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| GET | `/api/v1/reports/summary` | JSON: KPIs, ventas diarias, top productos y clientes |
+| GET | `/api/v1/reports/chart/sales` | PNG: ventas por día |
+| GET | `/api/v1/reports/chart/products` | PNG: top productos |
+| GET | `/api/v1/reports/export/excel` | Descarga `.xlsx` |
+| GET | `/api/v1/reports/export/pdf` | Descarga `.pdf` |
 
-## Inventory
-
-- Automatic stock updates
-- Stock validation
-
-## Invoices
-
-- Transaction-safe processing
-- Automatic inventory deduction
+Query comunes: `days` (por defecto 30), `start_date`, `end_date`, `ranking_limit`.
 
 ---
 
-# 📊 Reports
+## Docker
 
-- Sales summary
-- Top products
-- Inventory report
-
-## Export
-
-- CSV → sales_report.csv
-- Excel → inventory_report.xlsx
-
----
-
-# 🧾 PDF Generation
-
-Invoices can be exported as PDF using ReportLab.
-
----
-
-# 🧠 Logging & Error Handling
-
-- Structured logs (`app.log`)
-- Custom exceptions
-- Safe transactions with rollback
-
----
-
-# 🔄 Background Jobs (Celery)
-
-Example:
-
-```
-send_invoice_email.delay(invoice_id)
+```bash
+docker compose up --build
 ```
 
----
-
-# ⚡ Caching (Redis)
-
-- Product caching per tenant
-- TTL-based cache
+Define `DATABASE_URL` para PostgreSQL dentro de la red del compose. Aplica migraciones y *seed* según tu flujo de despliegue.
 
 ---
 
-# 🏢 Multi-Tenant Architecture
+## Permisos (ejemplos)
 
-Each record is scoped by:
-
-```
-tenant_id
-```
-
-Ensures:
-
-- Data isolation
-- SaaS readiness
+Definidos en `app/core/permissions.py`, por ejemplo: `create_product`, `read_invoice`, `read_report`, `manage_users`, etc.
 
 ---
 
-# 🐳 Docker Setup
+## Roadmap / ideas
 
-## Run full system
-
-```
-docker-compose up --build
-```
-
-Services:
-
-- API
-- PostgreSQL
-- Redis
-- Celery Worker
+- Tests automatizados y CI (GitHub Actions)
+- Refresh tokens y endurecimiento de seguridad
+- Frontend (dashboard)
+- Rate limiting en endpoints sensibles
+- Multi-tenant (si aplica)
 
 ---
 
-# 🚀 API Documentation
+## Contribuciones
 
-Available at:
-
-```
-http://localhost:8000/docs
-```
+*Fork* y *pull requests* son bienvenidos. Para cambios grandes, abre antes una *issue* para alinear el diseño.
 
 ---
 
-# 🚦 Rate Limiting
+## Autor
 
-Example:
-
-```
-5 requests per minute (login endpoint)
-```
-
----
-
-# 🔐 Security Features
-
-- Password hashing (bcrypt)
-- JWT authentication
-- Role-based access control
-- Rate limiting
-- Token expiration
-
----
-
-# 🧠 Advanced Concepts Implemented
-
-- Unit of Work (SQLAlchemy)
-- Transaction management
-- Lazy vs Eager loading
-- Multi-tenant isolation
-- Async job processing
-- Caching strategies
-
----
-
-# 🚀 CI/CD Pipeline
-
-GitHub Actions workflow:
-
-- Build Docker image
-- Run tests
-- Deploy (configurable)
-
----
-
-# 📈 Future Improvements
-
-- React Frontend (Dashboard)
-- WebSockets (real-time updates)
-- Payment integration
-- Audit analytics dashboard
-
----
-
-# 👨‍💻 Author
-
-Built as a **full-stack backend learning system** evolving into a production-ready SaaS architecture.
-
----
-
-# 🧠 Final Thought
-
-> This project is not just code.
->
-> It is a journey from fundamentals → architecture → production systems.
-
----
-
-# ⭐ Contribute / Learn
-
-Feel free to fork, extend, and use this as a base for:
-
-- ERP systems
-- POS systems
-- SaaS platforms
-
----
-
----
-
-# 🧠 Recomendación final
-
-Dear student…
-
-Guarda este README en tu repositorio y úsalo como:
-
-✔ Portafolio profesional
-✔ Documento de arquitectura
-✔ Base para entrevistas técnicas
-
----
-
-Si luego quieres, puedo ayudarte a crear:
-
-- 🎯 README estilo **GitHub Elite (con badges + diagrams + screenshots)**
-- 📊 Arquitectura con diagramas (tipo AWS)
-- 🧾 Documentación tipo Swagger profesional
-
----
-
-Solo dime:
-
-> **“upgrade README to elite level”**
-
-Y lo llevamos al siguiente nivel 🚀
+Proyecto de aprendizaje y base para ERP/POS; evolución documentada en el propio código y en este README.
