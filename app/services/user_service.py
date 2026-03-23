@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.security import hash_password, verify_password
@@ -65,6 +65,70 @@ def create_user(
             raise ValueError(f"Unknown roles: {', '.join(sorted(missing))}")
         user.roles.extend(roles)
     db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def count_users(db: Session) -> int:
+    n = db.scalar(
+        select(func.count()).select_from(User).where(User.deleted_at.is_(None))
+    )
+    return int(n or 0)
+
+
+def list_users(db: Session) -> list[User]:
+    stmt = (
+        select(User)
+        .where(User.deleted_at.is_(None))
+        .options(selectinload(User.roles))
+        .order_by(User.id)
+    )
+    return list(db.scalars(stmt).all())
+
+
+def set_user_active(
+    db: Session,
+    *,
+    user_id: int,
+    is_active: bool,
+    actor_id: int | None,
+) -> User:
+    user = get_user_with_rbac(db, user_id)
+    if user is None:
+        raise ValueError("Usuario no encontrado")
+    user.is_active = is_active
+    apply_update_audit(user, user_id=actor_id)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def sync_user_roles(
+    db: Session,
+    *,
+    user_id: int,
+    role_names: list[str],
+    actor_id: int | None,
+) -> User:
+    user = get_user_with_rbac(db, user_id)
+    if user is None:
+        raise ValueError("Usuario no encontrado")
+    roles = list(
+        db.scalars(
+            select(Role).where(
+                Role.name.in_(role_names),
+                Role.deleted_at.is_(None),
+            )
+        ).all()
+    )
+    found = {r.name for r in roles}
+    missing = set(role_names) - found
+    if missing:
+        raise ValueError(f"Roles desconocidos: {', '.join(sorted(missing))}")
+    user.roles.clear()
+    user.roles.extend(roles)
+    apply_update_audit(user, user_id=actor_id)
     db.commit()
     db.refresh(user)
     return user

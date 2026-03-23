@@ -30,6 +30,24 @@ Backend de **gestión de ventas** con API REST (FastAPI), menú CLI, RBAC, factu
 
 ---
 
+## Librerías Python (`requirements.txt`)
+
+Versiones pinnadas en **`requirements.txt`** (instalación: `pip install -r requirements.txt`). **Pydantic** (v2) llega como dependencia de **FastAPI**.
+
+| Bloque | Paquetes (PyPI) |
+|--------|-----------------|
+| **API y servidor** | `fastapi`, `pydantic-settings`, `uvicorn[standard]` |
+| **Base de datos y migraciones** | `SQLAlchemy`, `alembic`, `greenlet`, `psycopg[binary]` |
+| **Colas y caché** | `celery`, `redis` |
+| **Seguridad** | `bcrypt`, `python-jose[cryptography]`, `python-multipart` |
+| **Análisis, estadística y gráficos** | `numpy`, `pandas`, `polars`, `pyarrow`, `scipy`, `statsmodels`, `matplotlib`, `seaborn` |
+| **Informes y exportación** | `openpyxl`, `xlsxwriter`, `reportlab` |
+| **Jupyter / notebooks** | `jupyterlab`, `notebook`, `ipykernel` |
+| **CLI** | `tabulate` |
+| **Tipado** | `typing_extensions` |
+
+---
+
 ## Estructura del proyecto
 
 ```
@@ -102,7 +120,14 @@ python -m alembic upgrade head
 python scripts/seed.py
 ```
 
-El *seed* crea permisos, roles, usuario **`admin`** / contraseña **`admin`** (cámbiala en producción) y el cliente *Walk-in*.
+El *seed* es **idempotente** y rellena, entre otros:
+
+- **Permisos** y **roles** (`admin`, `cashier`, `viewer`) alineados con `app.core.permissions`.
+- **Usuarios demo** (misma contraseña que el nombre de usuario; cámbialos en producción): **`admin`**, **`cashier`**, **`viewer`**.
+- **Perfiles** (`profiles`) para esos tres usuarios, con nombre para mostrar.
+- **Clientes**: *Walk-in* y **Cliente demo (seed)**.
+- **Proveedor**: **Proveedor central (seed)**.
+- **Productos** con SKU `SEED-001` y `SEED-002`, **inventario** inicial y, si aún no existe, una **factura** demo sobre *Walk-in* (nota con texto de marcador *seed*, IVA 21 %).
 
 ### 6. Arrancar la API (opcional)
 
@@ -135,12 +160,13 @@ Aplicación **interactiva en español** para gestionar el negocio desde la termi
 | Aspecto | Detalle |
 |---------|---------|
 | **Comando** | `python -m app.cli.main` |
-| **Archivos** | Entrada: `app/cli/main.py` · Lógica y textos: `app/cli/menu.py` |
-| **Salida tabular** | Librería **tabulate** (listados legibles en consola) |
-| **Auditoría** | Las altas/bajas/modificaciones usan como actor al usuario **`admin`** si existe (alineado con el *seed*) |
+| **Archivos** | Entrada: `app/cli/main.py` · Lógica: `app/cli/menu.py` · Tablas: `app/cli/tablefmt.py` · Consola: `app/cli/terminal.py` |
+| **Salida tabular** | **tabulate** con formato propio (`CLI_TABLEFMT`): líneas `\|` y `-`, borde **superior e inferior**, sin `+` ni fila `=` bajo cabecera |
+| **Auditoría** | Si hay **sesión CLI**, el actor es ese usuario; si no, el usuario **`admin`** si existe (*seed*) |
+| **Validación** | Altas de usuario en consola pasan por **`app.utils.validation`** (Pydantic, alineado con `UserCreate`) |
 | **Reportes en disco** | PNG, Excel y PDF se guardan en **`REPORTS_OUTPUT_DIR`** (por defecto `var/reports/`) |
 
-**Importante:** el CLI **no usa JWT** ni la capa HTTP: abre sesiones SQLAlchemy directamente. La **API REST** sigue siendo la vía adecuada para clientes externos, permisos por token y documentación OpenAPI.
+**Importante:** el CLI **no usa JWT** ni la capa HTTP: abre sesiones SQLAlchemy directamente. **Login / registro** en consola actualizan la sesión en memoria del proceso (no emiten token). La **API REST** sigue siendo la vía adecuada para clientes externos, permisos por token y documentación OpenAPI.
 
 ### Menú principal
 
@@ -152,6 +178,10 @@ Aplicación **interactiva en español** para gestionar el negocio desde la termi
 | **4** Inventario | Ver stock de todos los productos; fijar stock de un producto |
 | **5** Proveedores | CRUD |
 | **6** Reportes | KPIs y ventas diarias en tabla; rankings; gráficos PNG; exportación Excel/PDF |
+| **7** Cuenta y sesión | Iniciar sesión (usuario/contraseña), cerrar sesión, ver usuario y permisos efectivos |
+| **8** Registro | Si la base **no tiene usuarios**, crea el primer **admin**. Si ya hay usuarios, solo un usuario con **`manage_users`** puede dar de alta aquí |
+| **9** Usuarios / RBAC | Listar usuarios; crear usuario; asignar roles; activar/desactivar; listar roles y permisos del sistema (las acciones de escritura exigen **`manage_users`** y sesión iniciada) |
+| **10** Limpiar pantalla | Borra la consola (secuencias ANSI; consolas modernas) |
 | **0** Salir | Cierra el programa |
 
 Para salir en cualquier momento también puedes usar **Ctrl+C**.

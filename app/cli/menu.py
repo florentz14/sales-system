@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 from pathlib import Path
 
 from sqlalchemy import select
@@ -10,6 +11,9 @@ from tabulate import tabulate  # pyright: ignore[reportMissingModuleSource]
 
 from app.analytics import charts, exports
 from app.analytics.service import load_report_bundle
+from app.cli.tablefmt import CLI_TABLEFMT as _TABLEFMT
+from app.cli.terminal import clear_screen
+from app.core import permissions as perms
 from app.core.config import get_settings
 from app.db.models.user import User
 from app.db.session import SessionLocal
@@ -20,8 +24,25 @@ from app.services import (
     invoice_service,
     inventory_service,
     product_service,
+    rbac_service,
     supplier_service,
+    user_service,
 )
+from app.services.auth_service import has_permission
+from app.utils.validation import parse_role_names_csv, user_create_from_cli
+
+_cli_session_user_id: int | None = None
+
+
+def _print_menu_table(title: str, options: list[tuple[str, str]]) -> None:
+    print(f"\n{title}")
+    print(
+        tabulate(
+            options,
+            headers=["Opción", "Acción"],
+            tablefmt=_TABLEFMT,
+        )
+    )
 
 
 def _read_line(prompt: str, default: str | None = None) -> str:
@@ -61,7 +82,21 @@ def _read_float(prompt: str, *, min_exclusive: float = 0) -> float | None:
     return x
 
 
+def _cli_set_session(user_id: int | None) -> None:
+    global _cli_session_user_id
+    _cli_session_user_id = user_id
+
+
+def _cli_current_user(db: Session) -> User | None:
+    if _cli_session_user_id is None:
+        return None
+    return user_service.get_user_with_rbac(db, _cli_session_user_id)
+
+
 def _actor_id(db: Session) -> int | None:
+    u = _cli_current_user(db)
+    if u is not None:
+        return u.id
     return db.scalar(
         select(User.id).where(
             User.username == "admin",
@@ -78,11 +113,305 @@ def _session(fn) -> None:
         db.close()
 
 
+def _require_manage_users(db: Session) -> User | None:
+    u = _cli_current_user(db)
+    if u is None:
+        print("  Inicie sesión con un usuario con permiso manage_users.")
+        return None
+    u = user_service.get_user_with_rbac(db, u.id)
+    if u is None:
+        return None
+    if not has_permission(u, perms.MANAGE_USERS):
+        print("  No tiene permiso para administrar usuarios (manage_users).")
+        return None
+    return u
+
+
+def _rbac_create_user_interactive(db: Session) -> None:
+    username = _read_line("Nombre de usuario: ")
+    p1 = getpass.getpass("Contraseña: ")
+    p2 = getpass.getpass("Repita la contraseña: ")
+    if p1 != p2:
+        print("  Las contraseñas no coinciden.")
+        return
+    roles_raw = _read_line("Roles (coma, ej: viewer,cashier) [viewer]: ", default="viewer")
+    role_names = parse_role_names_csv(roles_raw)
+    if not role_names:
+        role_names = ["viewer"]
+    validated, err = user_create_from_cli(username, p1, role_names)
+    if validated is None:
+        print(f"  {err or 'Datos no válidos.'}")
+        return
+    try:
+        user_service.create_user(
+            db,
+            username=validated.username,
+            password=validated.password,
+            role_names=validated.role_names,
+            actor_id=_actor_id(db),
+        )
+    except ValueError as e:
+        print(f"  {e}")
+        return
+    print("  Usuario creado.")
+
+
+def _rbac_list_users(db: Session) -> None:
+    rows = user_service.list_users(db)
+    table = [
+        [u.id, u.username, "sí" if u.is_active else "no", ", ".join(r.name for r in u.roles) or "—"]
+        for u in rows
+    ]
+    print(
+        tabulate(
+            table,
+            headers=["ID", "Usuario", "Activo", "Roles"],
+            tablefmt=_TABLEFMT,
+        )
+    )
+
+
+def _rbac_list_roles(db: Session) -> None:
+    roles = rbac_service.list_roles(db)
+    table = [
+        [
+            r.name,
+            (r.description or "—")[:60],
+            ", ".join(sorted(p.name for p in r.permissions)) or "—",
+        ]
+        for r in roles
+    ]
+    print(
+        tabulate(
+            table,
+            headers=["Rol", "Descripción", "Permisos"],
+            tablefmt=_TABLEFMT,
+        )
+    )
+
+
+def _rbac_list_permissions(db: Session) -> None:
+    plist = rbac_service.list_permissions(db)
+    table = [[p.name, p.description or "—"] for p in plist]
+    print(
+        tabulate(
+            table,
+            headers=["Permiso", "Descripción"],
+            tablefmt=_TABLEFMT,
+        )
+    )
+
+
+def _rbac_create_user_guarded(db: Session) -> None:
+    if _require_manage_users(db) is None:
+        return
+    _rbac_create_user_interactive(db)
+
+
+def _rbac_assign_roles(db: Session) -> None:
+    if _require_manage_users(db) is None:
+        return
+    uid = _read_int("ID usuario: ", min_v=1)
+    if uid is None:
+        return
+    roles_raw = _read_line("Roles (coma, nombres exactos; vacío = sin roles): ")
+    role_names = parse_role_names_csv(roles_raw)
+    try:
+        user_service.sync_user_roles(
+            db,
+            user_id=uid,
+            role_names=role_names,
+            actor_id=_actor_id(db),
+        )
+    except ValueError as e:
+        print(f"  {e}")
+        return
+    print("  Roles actualizados.")
+
+
+def _rbac_toggle_active(db: Session) -> None:
+    actor = _require_manage_users(db)
+    if actor is None:
+        return
+    uid = _read_int("ID usuario: ", min_v=1)
+    if uid is None:
+        return
+    if actor.id == uid:
+        print("  No puede cambiar el estado de su propia cuenta aquí.")
+        return
+    ch = _read_line("1 Activar  2 Desactivar: ")
+    if ch == "1":
+        is_active = True
+    elif ch == "2":
+        is_active = False
+    else:
+        print("  Opción no válida.")
+        return
+    try:
+        user_service.set_user_active(
+            db,
+            user_id=uid,
+            is_active=is_active,
+            actor_id=_actor_id(db),
+        )
+    except ValueError as e:
+        print(f"  {e}")
+        return
+    print("  Estado actualizado.")
+
+
+def _account_login(db: Session) -> None:
+    name = _read_line("Usuario: ")
+    if not name:
+        print("  Usuario obligatorio.")
+        return
+    pw = getpass.getpass("Contraseña: ")
+    user = user_service.authenticate(db, name.strip(), pw)
+    if user is None:
+        print("  Credenciales incorrectas o usuario inactivo.")
+        return
+    _cli_set_session(user.id)
+    print(f"  Sesión iniciada: {user.username}.")
+
+
+def _account_show_self(db: Session) -> None:
+    u = _cli_current_user(db)
+    if u is None:
+        print("  No hay sesión iniciada.")
+        return
+    u = user_service.get_user_with_rbac(db, u.id)
+    if u is None:
+        print("  Usuario no encontrado.")
+        return
+    perm_names: set[str] = set()
+    for r in u.roles:
+        for p in r.permissions:
+            perm_names.add(p.name)
+    print(
+        tabulate(
+            [
+                ["Usuario", u.username],
+                ["Activo", "sí" if u.is_active else "no"],
+                ["Roles", ", ".join(r.name for r in u.roles) or "—"],
+                ["Permisos", ", ".join(sorted(perm_names)) or "—"],
+            ],
+            headers=["Campo", "Valor"],
+            tablefmt=_TABLEFMT,
+        )
+    )
+
+
+def _menu_account() -> None:
+    while True:
+        _print_menu_table(
+            "--- Cuenta y sesión ---",
+            [
+                ("1", "Iniciar sesión"),
+                ("2", "Cerrar sesión"),
+                ("3", "Ver usuario y permisos actuales"),
+                ("0", "Volver"),
+            ],
+        )
+        op = _read_line("Opción: ")
+        if op == "0":
+            return
+        if op == "1":
+            _session(_account_login)
+        elif op == "2":
+            _cli_set_session(None)
+            print("  Sesión cerrada.")
+        elif op == "3":
+            _session(_account_show_self)
+        else:
+            print("  Opción no válida.")
+
+
+def _menu_register() -> None:
+    def _do(db: Session) -> None:
+        n = user_service.count_users(db)
+        if n == 0:
+            print("  No hay usuarios: se creará el primer administrador (rol admin).")
+            username = _read_line("Nombre de usuario: ")
+            p1 = getpass.getpass("Contraseña: ")
+            p2 = getpass.getpass("Repita la contraseña: ")
+            if p1 != p2:
+                print("  Las contraseñas no coinciden.")
+                return
+            validated, err = user_create_from_cli(username, p1, ["admin"])
+            if validated is None:
+                print(f"  {err or 'Datos no válidos.'}")
+                return
+            try:
+                user_service.create_user(
+                    db,
+                    username=validated.username,
+                    password=validated.password,
+                    role_names=["admin"],
+                    actor_id=None,
+                )
+            except ValueError as e:
+                print(f"  {e}")
+                return
+            print("  Administrador creado. Use «Cuenta y sesión» para entrar.")
+            return
+        cur = _cli_current_user(db)
+        cur = user_service.get_user_with_rbac(db, cur.id) if cur else None
+        if cur is None or not has_permission(cur, perms.MANAGE_USERS):
+            print(
+                "  El registro público está cerrado. Inicie sesión como administrador "
+                "o use «Usuarios, roles y permisos» → Crear usuario."
+            )
+            return
+        _rbac_create_user_interactive(db)
+
+    _session(_do)
+
+
+def _menu_rbac() -> None:
+    while True:
+        _print_menu_table(
+            "--- Usuarios, roles y permisos ---",
+            [
+                ("1", "Listar usuarios"),
+                ("2", "Crear usuario"),
+                ("3", "Asignar roles a un usuario"),
+                ("4", "Activar o desactivar usuario"),
+                ("5", "Listar roles y sus permisos"),
+                ("6", "Listar permisos del sistema"),
+                ("0", "Volver"),
+            ],
+        )
+        op = _read_line("Opción: ")
+        if op == "0":
+            return
+        if op == "1":
+            _session(_rbac_list_users)
+        elif op == "2":
+            _session(_rbac_create_user_guarded)
+        elif op == "3":
+            _session(_rbac_assign_roles)
+        elif op == "4":
+            _session(_rbac_toggle_active)
+        elif op == "5":
+            _session(_rbac_list_roles)
+        elif op == "6":
+            _session(_rbac_list_permissions)
+        else:
+            print("  Opción no válida.")
+
+
 def _menu_products() -> None:
     while True:
-        print(
-            "\n--- Productos ---\n"
-            "1 Listar   2 Ver   3 Crear   4 Editar   5 Eliminar   0 Volver"
+        _print_menu_table(
+            "--- Productos ---",
+            [
+                ("1", "Listar"),
+                ("2", "Ver"),
+                ("3", "Crear"),
+                ("4", "Editar"),
+                ("5", "Eliminar"),
+                ("0", "Volver"),
+            ],
         )
         op = _read_line("Opción: ")
         if op == "0":
@@ -117,7 +446,7 @@ def _products_list(db: Session) -> None:
         tabulate(
             table,
             headers=["ID", "SKU", "Nombre", "Precio", "Stock"],
-            tablefmt="github",
+            tablefmt=_TABLEFMT,
         )
     )
 
@@ -138,7 +467,8 @@ def _product_show(db: Session, product_id: int) -> None:
                 ["Precio", f"{p.price:.2f}"],
                 ["Stock", stock],
             ],
-            tablefmt="github",
+            headers=["Campo", "Valor"],
+            tablefmt=_TABLEFMT,
         )
     )
 
@@ -225,9 +555,16 @@ def _product_delete(db: Session, product_id: int) -> None:
 
 def _menu_customers() -> None:
     while True:
-        print(
-            "\n--- Clientes ---\n"
-            "1 Listar   2 Ver   3 Crear   4 Editar   5 Eliminar   0 Volver"
+        _print_menu_table(
+            "--- Clientes ---",
+            [
+                ("1", "Listar"),
+                ("2", "Ver"),
+                ("3", "Crear"),
+                ("4", "Editar"),
+                ("5", "Eliminar"),
+                ("0", "Volver"),
+            ],
         )
         op = _read_line("Opción: ")
         if op == "0":
@@ -259,7 +596,7 @@ def _customers_list(db: Session) -> None:
         tabulate(
             table,
             headers=["ID", "Nombre", "Email", "Teléfono"],
-            tablefmt="github",
+            tablefmt=_TABLEFMT,
         )
     )
 
@@ -278,7 +615,8 @@ def _customer_show(db: Session, customer_id: int) -> None:
                 ["Teléfono", c.phone or ""],
                 ["Dirección", c.address or ""],
             ],
-            tablefmt="github",
+            headers=["Campo", "Valor"],
+            tablefmt=_TABLEFMT,
         )
     )
 
@@ -342,9 +680,15 @@ def _customer_delete(db: Session, customer_id: int) -> None:
 
 def _menu_invoices() -> None:
     while True:
-        print(
-            "\n--- Facturas ---\n"
-            "1 Listar   2 Ver   3 Crear   4 Anular (soft delete)   0 Volver"
+        _print_menu_table(
+            "--- Facturas ---",
+            [
+                ("1", "Listar"),
+                ("2", "Ver"),
+                ("3", "Crear"),
+                ("4", "Anular (soft delete)"),
+                ("0", "Volver"),
+            ],
         )
         op = _read_line("Opción: ")
         if op == "0":
@@ -395,7 +739,7 @@ def _invoices_list(db: Session) -> None:
                 "IVA",
                 "Total",
             ],
-            tablefmt="github",
+            tablefmt=_TABLEFMT,
         )
     )
 
@@ -419,7 +763,8 @@ def _invoice_show(db: Session, invoice_id: int) -> None:
                 ["Total", f"{inv.total:.2f}"],
                 ["Notas", (inv.notes or "")[:120]],
             ],
-            tablefmt="github",
+            headers=["Campo", "Valor"],
+            tablefmt=_TABLEFMT,
         )
     )
     lines = [
@@ -439,7 +784,7 @@ def _invoice_show(db: Session, invoice_id: int) -> None:
             tabulate(
                 lines,
                 headers=["Línea", "Producto", "Cant.", "P. unit.", "Dto.%"],
-                tablefmt="github",
+                tablefmt=_TABLEFMT,
             )
         )
 
@@ -534,9 +879,13 @@ def _invoice_void(db: Session, invoice_id: int) -> None:
 
 def _menu_inventory() -> None:
     while True:
-        print(
-            "\n--- Inventario ---\n"
-            "1 Ver stock de todos   2 Fijar stock de un producto   0 Volver"
+        _print_menu_table(
+            "--- Inventario ---",
+            [
+                ("1", "Ver stock de todos"),
+                ("2", "Fijar stock de un producto"),
+                ("0", "Volver"),
+            ],
         )
         op = _read_line("Opción: ")
         if op == "0":
@@ -572,9 +921,16 @@ def _inventory_set(db: Session, product_id: int) -> None:
 
 def _menu_suppliers() -> None:
     while True:
-        print(
-            "\n--- Proveedores ---\n"
-            "1 Listar   2 Ver   3 Crear   4 Editar   5 Eliminar   0 Volver"
+        _print_menu_table(
+            "--- Proveedores ---",
+            [
+                ("1", "Listar"),
+                ("2", "Ver"),
+                ("3", "Crear"),
+                ("4", "Editar"),
+                ("5", "Eliminar"),
+                ("0", "Volver"),
+            ],
         )
         op = _read_line("Opción: ")
         if op == "0":
@@ -606,7 +962,7 @@ def _suppliers_list(db: Session) -> None:
         tabulate(
             table,
             headers=["ID", "Nombre", "Email", "Teléfono"],
-            tablefmt="github",
+            tablefmt=_TABLEFMT,
         )
     )
 
@@ -625,7 +981,8 @@ def _supplier_show(db: Session, supplier_id: int) -> None:
                 ["Teléfono", s.phone or ""],
                 ["Dirección", s.address or ""],
             ],
-            tablefmt="github",
+            headers=["Campo", "Valor"],
+            tablefmt=_TABLEFMT,
         )
     )
 
@@ -699,15 +1056,17 @@ def _ensure_reports_dir() -> Path:
 
 def _menu_reports() -> None:
     while True:
-        print(
-            "\n--- Reportes y análisis ---\n"
-            "1 Resumen KPI + ventas diarias (tabla)\n"
-            "2 Top productos y clientes (tablas)\n"
-            "3 Gráfico ventas/día (PNG)\n"
-            "4 Gráfico top productos (PNG)\n"
-            "5 Exportar Excel (.xlsx)\n"
-            "6 Exportar PDF\n"
-            "0 Volver"
+        _print_menu_table(
+            "--- Reportes y análisis ---",
+            [
+                ("1", "Resumen KPI + ventas diarias (tabla)"),
+                ("2", "Top productos y clientes (tablas)"),
+                ("3", "Gráfico ventas/día (PNG)"),
+                ("4", "Gráfico top productos (PNG)"),
+                ("5", "Exportar Excel (.xlsx)"),
+                ("6", "Exportar PDF"),
+                ("0", "Volver"),
+            ],
         )
         op = _read_line("Opción: ")
         if op == "0":
@@ -741,7 +1100,8 @@ def _reports_kpi_table(db: Session) -> None:
                 ["Ticket medio", f"{k['avg_ticket']:.2f}"],
                 ["Periodo", b["period_label"]],
             ],
-            tablefmt="github",
+            headers=["Campo", "Valor"],
+            tablefmt=_TABLEFMT,
         )
     )
     print("\nVentas por día:")
@@ -749,7 +1109,7 @@ def _reports_kpi_table(db: Session) -> None:
         tabulate(
             [[r["day"], f"{r['total']:.2f}", r["invoices"]] for r in b["daily"]],
             headers=["Día", "Total", "Facturas"],
-            tablefmt="github",
+            tablefmt=_TABLEFMT,
         )
     )
 
@@ -771,7 +1131,7 @@ def _reports_rankings_table(db: Session) -> None:
                 for r in b["products"]
             ],
             headers=["ID", "Producto", "Uds.", "Ingreso"],
-            tablefmt="github",
+            tablefmt=_TABLEFMT,
         )
     )
     print("\nTop clientes:")
@@ -782,7 +1142,7 @@ def _reports_rankings_table(db: Session) -> None:
                 for r in b["customers"]
             ],
             headers=["ID", "Cliente", "Fact.", "Total"],
-            tablefmt="github",
+            tablefmt=_TABLEFMT,
         )
     )
 
@@ -840,15 +1200,33 @@ def _reports_save_pdf(db: Session) -> None:
 def run_cli() -> None:
     print("Sistema de ventas — menú CLI (Ctrl+C para salir).")
     while True:
-        print(
-            "\n=== MENÚ PRINCIPAL ===\n"
-            "1 Productos\n"
-            "2 Clientes\n"
-            "3 Facturas\n"
-            "4 Inventario\n"
-            "5 Proveedores\n"
-            "6 Reportes / gráficos / exportar\n"
-            "0 Salir"
+        db = SessionLocal()
+        try:
+            su = _cli_current_user(db)
+            su = user_service.get_user_with_rbac(db, su.id) if su else None
+        finally:
+            db.close()
+        linea = (
+            f"  Sesión: {su.username}"
+            if su
+            else "  Sin sesión (auditoría puede usar «admin» si existe en la base de datos)."
+        )
+        print(f"\n{linea}")
+        _print_menu_table(
+            "--- Menú principal ---",
+            [
+                ("1", "Productos"),
+                ("2", "Clientes"),
+                ("3", "Facturas"),
+                ("4", "Inventario"),
+                ("5", "Proveedores"),
+                ("6", "Reportes / gráficos / exportar"),
+                ("7", "Cuenta y sesión (login / logout)"),
+                ("8", "Registro de usuario"),
+                ("9", "Usuarios, roles y permisos"),
+                ("10", "Limpiar pantalla"),
+                ("0", "Salir"),
+            ],
         )
         op = _read_line("Opción: ")
         if op == "0":
@@ -866,6 +1244,14 @@ def run_cli() -> None:
             _menu_suppliers()
         elif op == "6":
             _menu_reports()
+        elif op == "7":
+            _menu_account()
+        elif op == "8":
+            _menu_register()
+        elif op == "9":
+            _menu_rbac()
+        elif op == "10":
+            clear_screen()
         else:
             print("  Opción no válida.")
 
